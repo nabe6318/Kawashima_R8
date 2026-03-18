@@ -1,0 +1,7 @@
+streamlit
+pandas
+geopandas
+pyogrio
+leafmap
+streamlit-folium
+st-gsheets-connection
