@@ -77,8 +77,12 @@ def load_survey_points(conn):
         df = conn.read(ttl=0)
         if df is not None and not df.empty:
             # 緯度経度がある行のみ抽出
-            return df.dropna(subset=['point_lat', 'point_lng'])
-        return pd.DataFrame(columns=["fid", "point_lng", "point_lat", "調査日", "作付状況", "調査者", "タイムスタンプ"])
+            df = df.dropna(subset=['point_lat', 'point_lng'])
+            # 備考カラムがまだ無い場合に備えて初期化
+            if "備考" not in df.columns:
+                df["備考"] = ""
+            return df
+        return pd.DataFrame(columns=["fid", "point_lng", "point_lat", "調査日", "作付状況", "調査者", "備考", "タイムスタンプ"])
     except Exception as e:
         return pd.DataFrame()
 
@@ -86,7 +90,7 @@ def load_survey_points(conn):
 
 def main():
     # タイトル
-    st.markdown("<h1>🗺️ 川島地区農地調査システム (信大作成・Osamu Watanabe)</h1>", unsafe_allow_html=True)
+    st.markdown("<h1>🗺️ 川島地区農地調査システム (信大作成)</h1>", unsafe_allow_html=True)
 
     # 接続とデータロード
     conn = st.connection(CONN_NAME, type=GSheetsConnection)
@@ -116,9 +120,11 @@ def main():
         if not df_survey.empty:
             for _, row in df_survey.iterrows():
                 p_color = get_marker_color(row["作付状況"])
+                # 備考があればツールチップに含める
+                memo_text = f" | 備考: {row['備考']}" if row['備考'] else ""
                 folium.Marker(
                     location=[row["point_lat"], row["point_lng"]],
-                    tooltip=f"FID:{row['fid']} | {row['作付状況']} ({row['調査者']})",
+                    tooltip=f"FID:{row['fid']} | {row['作付状況']} ({row['調査者']}){memo_text}",
                     icon=folium.Icon(color=p_color, icon="info-sign")
                 ).add_to(m)
 
@@ -157,6 +163,9 @@ def main():
             surveyor_options = ["選択してください", "A", "B", "C", "その他"]
             entry_surveyor = st.selectbox("調査者", options=surveyor_options)
 
+            # ★ 備考 (自由記述)
+            entry_memo = st.text_area("備考（特記事項など）", value="", help="雑草の繁茂状況や特記すべき点があれば記入してください")
+
             # 保存ボタン
             submit_button = st.form_submit_button("調査データを保存")
 
@@ -179,6 +188,7 @@ def main():
                         "調査日": entry_date.strftime("%Y-%m-%d"),
                         "作付状況": entry_status,
                         "調査者": entry_surveyor,
+                        "備考": entry_memo,  # 保存用データに追加
                         "タイムスタンプ": now
                     }])
 
