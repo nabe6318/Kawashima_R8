@@ -11,7 +11,7 @@ import folium
 # --- アプリの設定 ---
 st.set_page_config(page_title="農地調査システム・信大雑草研作成", layout="wide")
 
-# --- カスタムCSS (全体の文字サイズを小さく、余白を詰める) ---
+# --- カスタムCSS ---
 st.markdown("""
     <style>
     html, body, [class*="css"] {
@@ -34,10 +34,10 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # 設定値
-GEOJSON_FILE = 'kawashima2026p.geojson' 
+GEOJSON_FILE = 'kawashima2026p.geojson'
 CONN_NAME = "gsheets"
 
-# --- 色の設定（作付状況と色の対応） ---
+# --- 色の設定 ---
 def get_marker_color(status):
     color_map = {
         "水稲": "blue",
@@ -76,9 +76,7 @@ def load_survey_points(conn):
     try:
         df = conn.read(ttl=0)
         if df is not None and not df.empty:
-            # 緯度経度がある行のみ抽出
             df = df.dropna(subset=['point_lat', 'point_lng'])
-            # 備考カラムがまだ無い場合に備えて初期化
             if "備考" not in df.columns:
                 df["備考"] = ""
             return df
@@ -89,26 +87,32 @@ def load_survey_points(conn):
 # --- メイン処理 ---
 
 def main():
-    # タイトル
     st.markdown("<h1>🗺️ 川島地区農地調査システム (信大作成)</h1>", unsafe_allow_html=True)
 
-    # 接続とデータロード
     conn = st.connection(CONN_NAME, type=GSheetsConnection)
     gdf_polygons = load_base_polygons()
-    df_survey = load_survey_points(conn)
+
+    # ★変更①: 初回のみGSheetsから読み込み、以降はsession_stateを使う
+    if "survey_df" not in st.session_state:
+        st.session_state.survey_df = load_survey_points(conn)
+
+    df_survey = st.session_state.survey_df
 
     if gdf_polygons is None:
         st.warning(f"GeoJSONファイル '{GEOJSON_FILE}' が見つかりません。")
         st.stop()
 
-    # レイアウト
+    # ★変更②: 手動リロードボタンを追加（複数人運用時に他者の入力を反映できるよう）
+    if st.button("🔄 最新データを再読み込み"):
+        st.session_state.survey_df = load_survey_points(conn)
+        st.rerun()
+
     col_map, col_form = st.columns([2, 1])
 
     with col_map:
         st.subheader("圃場マップ")
         m = leafmap.Map(locate_control=True)
-        
-        # 1. 筆ポリゴン（背景）
+
         m.add_gdf(
             gdf_polygons,
             layer_name="農地筆ポリゴン",
@@ -116,11 +120,9 @@ def main():
             fields=["fid"]
         )
 
-        # 2. 調査済みピンを色分けして表示
         if not df_survey.empty:
             for _, row in df_survey.iterrows():
                 p_color = get_marker_color(row["作付状況"])
-                # 備考があればツールチップに含める
                 memo_text = f" | 備考: {row['備考']}" if row['備考'] else ""
                 folium.Marker(
                     location=[row["point_lat"], row["point_lng"]],
@@ -130,7 +132,6 @@ def main():
 
         map_output = st_folium(m, width="100%", height=600, key="survey_map")
 
-    # 地図クリック時のデータ取得
     clicked_fid = None
     clicked_lat = None
     clicked_lng = None
@@ -147,26 +148,20 @@ def main():
 
     with col_form:
         st.subheader("📝 調査情報入力")
-        
+
         with st.form("survey_form", clear_on_submit=True):
-            # FID (自動入力)
             st.number_input("FID (地図から選択)", value=clicked_fid if clicked_fid is not None else 0, disabled=True)
-            
-            # 作付状況 (プルダウン)
+
             status_options = ["選択してください", "水稲", "麦", "大豆", "そば", "果樹", "野菜類", "作付なし", "耕作放棄", "不明", "宅地等"]
             entry_status = st.selectbox("作付状況", options=status_options)
 
-            # 調査日
             entry_date = st.date_input("調査日", value=datetime.date.today())
 
-            # 調査者 (プルダウン)
             surveyor_options = ["選択してください", "A", "B", "C", "その他"]
             entry_surveyor = st.selectbox("調査者", options=surveyor_options)
 
-            # ★ 備考 (自由記述)
             entry_memo = st.text_area("備考（特記事項など）", value="", help="雑草の繁茂状況や特記すべき点があれば記入してください")
 
-            # 保存ボタン
             submit_button = st.form_submit_button("調査データを保存")
 
             if submit_button:
@@ -177,10 +172,8 @@ def main():
                 elif entry_surveyor == "選択してください":
                     st.warning("調査者を選択してください。")
                 else:
-                    # タイムスタンプ
                     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    
-                    # 新規データ
+
                     new_row = pd.DataFrame([{
                         "fid": clicked_fid,
                         "point_lng": clicked_lng,
@@ -188,26 +181,29 @@ def main():
                         "調査日": entry_date.strftime("%Y-%m-%d"),
                         "作付状況": entry_status,
                         "調査者": entry_surveyor,
-                        "備考": entry_memo,  # 保存用データに追加
+                        "備考": entry_memo,
                         "タイムスタンプ": now
                     }])
 
                     try:
-                        # 既存データと結合して更新
-                        existing_df = conn.read(ttl=0)
+                        # ★変更③: GSheetへの書き込みのみ。読み直しせずsession_stateに追記
+                        existing_df = conn.read(ttl=60)
                         updated_df = pd.concat([existing_df, new_row], ignore_index=True)
                         conn.update(data=updated_df)
-                        
+
+                        st.session_state.survey_df = pd.concat(
+                            [st.session_state.survey_df, new_row], ignore_index=True
+                        )
+
                         st.success(f"FID {clicked_fid} を保存しました。")
-                        st.rerun()
+                        # st.rerun() ← 削除：session_stateで表示が更新されるため不要
+
                     except Exception as e:
                         st.error(f"保存失敗: {e}")
 
-    # --- 下部のデータ一覧 (ソートエラー回避版) ---
     with st.expander("📊 現在の調査データ履歴"):
         if not df_survey.empty:
             try:
-                # タイムスタンプで降順ソート
                 if "タイムスタンプ" in df_survey.columns:
                     display_df = df_survey.sort_values("タイムスタンプ", ascending=False, na_position='last')
                 else:
