@@ -77,10 +77,12 @@ def load_survey_points(conn):
         df = conn.read(ttl=0)
         if df is not None and not df.empty:
             df = df.dropna(subset=['point_lat', 'point_lng'])
-            if "備考" not in df.columns:
-                df["備考"] = ""
+            # 必須カラムの補完
+            for col in ["備考", "作目"]:
+                if col not in df.columns:
+                    df[col] = ""
             return df
-        return pd.DataFrame(columns=["fid", "point_lng", "point_lat", "調査日", "作付状況", "調査者", "備考", "タイムスタンプ"])
+        return pd.DataFrame(columns=["fid", "point_lng", "point_lat", "調査日", "作付状況", "作目", "調査者", "備考", "タイムスタンプ"])
     except Exception as e:
         return pd.DataFrame()
 
@@ -92,7 +94,7 @@ def main():
     conn = st.connection(CONN_NAME, type=GSheetsConnection)
     gdf_polygons = load_base_polygons()
 
-    # ★変更①: 初回のみGSheetsから読み込み、以降はsession_stateを使う
+    # セッション状態の初期化
     if "survey_df" not in st.session_state:
         st.session_state.survey_df = load_survey_points(conn)
 
@@ -102,7 +104,7 @@ def main():
         st.warning(f"GeoJSONファイル '{GEOJSON_FILE}' が見つかりません。")
         st.stop()
 
-    # ★変更②: 手動リロードボタンを追加（複数人運用時に他者の入力を反映できるよう）
+    # 手動リロード
     if st.button("🔄 最新データを再読み込み"):
         st.session_state.survey_df = load_survey_points(conn)
         st.rerun()
@@ -123,15 +125,18 @@ def main():
         if not df_survey.empty:
             for _, row in df_survey.iterrows():
                 p_color = get_marker_color(row["作付状況"])
+                crop_text = f" ({row['作目']})" if row.get('作目') else ""
                 memo_text = f" | 備考: {row['備考']}" if row['備考'] else ""
+                
                 folium.Marker(
                     location=[row["point_lat"], row["point_lng"]],
-                    tooltip=f"FID:{row['fid']} | {row['作付状況']} ({row['調査者']}){memo_text}",
+                    tooltip=f"FID:{row['fid']} | {row['作付状況']}{crop_text} ({row['調査者']}){memo_text}",
                     icon=folium.Icon(color=p_color, icon="info-sign")
                 ).add_to(m)
 
         map_output = st_folium(m, width="100%", height=600, key="survey_map")
 
+    # 地図クリック時の処理
     clicked_fid = None
     clicked_lat = None
     clicked_lng = None
@@ -154,6 +159,9 @@ def main():
 
             status_options = ["選択してください", "水稲", "麦", "大豆", "そば", "果樹", "野菜類", "作付なし", "耕作放棄", "不明", "宅地等"]
             entry_status = st.selectbox("作付状況", options=status_options)
+
+            # --- 追加: 作目の入力 ---
+            entry_crop = st.text_input("作目 (例: キャベツ、ブロッコリー等)", value="", help="具体的な作物を入力してください")
 
             entry_date = st.date_input("調査日", value=datetime.date.today())
 
@@ -180,37 +188,38 @@ def main():
                         "point_lat": clicked_lat,
                         "調査日": entry_date.strftime("%Y-%m-%d"),
                         "作付状況": entry_status,
+                        "作目": entry_crop,
                         "調査者": entry_surveyor,
                         "備考": entry_memo,
                         "タイムスタンプ": now
                     }])
 
                     try:
-                        # ★変更③: GSheetへの書き込みのみ。読み直しせずsession_stateに追記
-                        existing_df = conn.read(ttl=60)
+                        # GSheetへの保存
+                        existing_df = conn.read(ttl=0)
                         updated_df = pd.concat([existing_df, new_row], ignore_index=True)
                         conn.update(data=updated_df)
 
+                        # Session Stateの更新
                         st.session_state.survey_df = pd.concat(
                             [st.session_state.survey_df, new_row], ignore_index=True
                         )
 
-                        st.success(f"FID {clicked_fid} を保存しました。")
-                        # st.rerun() ← 削除：session_stateで表示が更新されるため不要
+                        st.success(f"FID {clicked_fid} ({entry_status}) を保存しました。")
 
                     except Exception as e:
                         st.error(f"保存失敗: {e}")
 
+    # 履歴表示
     with st.expander("📊 現在の調査データ履歴"):
-        if not df_survey.empty:
+        if not st.session_state.survey_df.empty:
             try:
-                if "タイムスタンプ" in df_survey.columns:
-                    display_df = df_survey.sort_values("タイムスタンプ", ascending=False, na_position='last')
-                else:
-                    display_df = df_survey
-                st.dataframe(display_df, use_container_width=True)
+                df_display = st.session_state.survey_df
+                if "タイムスタンプ" in df_display.columns:
+                    df_display = df_display.sort_values("タイムスタンプ", ascending=False)
+                st.dataframe(df_display, use_container_width=True)
             except:
-                st.dataframe(df_survey, use_container_width=True)
+                st.dataframe(st.session_state.survey_df, use_container_width=True)
         else:
             st.info("データがありません。")
 
